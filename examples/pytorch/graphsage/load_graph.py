@@ -21,7 +21,7 @@ def load_ogb(name):
     graph, labels = data[0]
     labels = labels[:, 0]
 
-    graph.ndata['features'] = graph.ndata['feat']
+    graph.ndata['features'] = graph.ndata['feat'].share_memory_()
     graph.ndata['labels'] = labels
     in_feats = graph.ndata['features'].shape[1]
     num_labels = len(th.unique(labels[th.logical_not(th.isnan(labels))]))

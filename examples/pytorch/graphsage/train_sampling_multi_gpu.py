@@ -46,7 +46,7 @@ def load_subtensor(nfeat, labels, seeds, input_nodes, dev_id):
 
 #### Entry point
 
-def run(proc_id, n_gpus, args, devices, data):
+def run(proc_id, n_gpus, args, devices, data, d2d_queue, barrier):
     # Start up distributed training, if enabled.
     dev_id = devices[proc_id]
     if n_gpus > 1:
@@ -77,6 +77,28 @@ def run(proc_id, n_gpus, args, devices, data):
         train_nfeat = train_nfeat.to(dev_id)
         train_labels = train_labels.to(dev_id)
 
+    partitioned_tensors = th.split(train_nfeat, int(train_nfeat.shape[0]/n_gpus))
+    local_tensor = partitioned_tensors[proc_id].to("cuda:" + str(proc_id))
+
+    if proc_id == 0:
+        for i in range(n_gpus):
+            print("Partition: " + str(i) + "\n" + str(partitioned_tensors[i]))
+
+    multigpu_tensor = {}
+
+    for i in range(n_gpus-1):
+        d2d_queue[proc_id].put(local_tensor)
+
+    for i in range(n_gpus):
+        if i != proc_id:
+            multigpu_tensor[i] = d2d_queue[i].get()
+        else:
+            multigpu_tensor[i] = local_tensor
+
+    for i in range(n_gpus):
+        print("Proc: " + str(proc_id) + ", Partition: " + str(i) + "\n" + str(multigpu_tensor[i]))
+
+    barrier.wait()
     in_feats = train_nfeat.shape[1]
 
     train_mask = train_g.ndata['train_mask']
@@ -192,7 +214,7 @@ if __name__ == '__main__':
                                 "be undesired if they cannot fit in GPU memory at once. "
                                 "This flag disables that.")
     args = argparser.parse_args()
-    
+
     devices = list(map(int, args.gpu.split(',')))
     n_gpus = len(devices)
 
@@ -200,6 +222,10 @@ if __name__ == '__main__':
         g, n_classes = load_reddit()
     elif args.dataset == 'ogbn-products':
         g, n_classes = load_ogb('ogbn-products')
+    elif args.dataset == 'ogbn-papers100M':
+        g, n_classes = load_ogb('ogbn-papers100M')
+        # convert labels to interger
+        g.ndata['labels'] = th.as_tensor(g.ndata['labels'], dtype=th.int64)
     else:
         raise Exception('unknown dataset')
 
@@ -223,8 +249,12 @@ if __name__ == '__main__':
         run(0, n_gpus, args, devices, data)
     else:
         procs = []
+        barrier = mp.Barrier(n_gpus)
+        d2d_queue = []
         for proc_id in range(n_gpus):
-            p = mp.Process(target=run, args=(proc_id, n_gpus, args, devices, data))
+            d2d_queue.append(mp.SimpleQueue())
+        for proc_id in range(n_gpus):
+            p = mp.Process(target=run, args=(proc_id, n_gpus, args, devices, data, d2d_queue, barrier))
             p.start()
             procs.append(p)
         for p in procs:
